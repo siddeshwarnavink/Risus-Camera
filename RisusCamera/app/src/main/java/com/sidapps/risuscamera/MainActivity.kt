@@ -1,20 +1,25 @@
 package com.sidapps.risuscamera
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
+import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.sidapps.risuscamera.databinding.ActivityMainBinding
+import java.text.SimpleDateFormat
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -50,7 +55,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         viewBinding = ActivityMainBinding.inflate(layoutInflater)
-//        setContentView(R.layout.activity_main)
         setContentView(viewBinding.root)
 
         // Check if the device has a camera
@@ -65,6 +69,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             requestPermissions()
         }
+
+        viewBinding.imageCaptureButton.setOnClickListener { takePhoto() }
 
         cameraExecutor = Executors.newSingleThreadExecutor()
     }
@@ -83,21 +89,70 @@ class MainActivity : AppCompatActivity() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener(Runnable {
             val cameraProvider = cameraProviderFuture.get()
+
             val preview: Preview = Preview.Builder()
                 .build()
-            val cameraSelector: CameraSelector = CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_BACK)
+
+            imageCapture = ImageCapture.Builder()
                 .build()
 
-            preview.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
+            val cameraSelector: CameraSelector = CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
+                .build()
 
-            cameraProvider.bindToLifecycle(this as LifecycleOwner, cameraSelector, preview)
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(this as LifecycleOwner, cameraSelector, preview, imageCapture)
+            } catch(exc: Exception) {
+                Log.e("TAG", "Use case binding failed", exc)
+            }
+
+            preview.setSurfaceProvider(viewBinding.viewFinder.surfaceProvider)
         }, ContextCompat.getMainExecutor(this))
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
+    }
+
+    private fun takePhoto() {
+        val imageCapture = imageCapture ?: return
+
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US)
+            .format(System.currentTimeMillis())
+
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Reisus-Image")
+            }
+        }
+
+        val outputOptions = ImageCapture.OutputFileOptions
+            .Builder(
+                contentResolver,
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                contentValues
+            )
+            .build()
+
+        imageCapture.takePicture(
+            outputOptions,
+            ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onError(exc: ImageCaptureException) {
+                    Log.e("TAG", "Photo capture failed: ${exc.message}", exc)
+                }
+
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    val msg = "Photo capture!"
+                    Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
+                    Log.d("TAG", msg + name)
+                }
+            }
+        )
     }
 
     companion object {
