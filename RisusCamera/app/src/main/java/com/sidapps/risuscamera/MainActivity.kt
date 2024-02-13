@@ -1,5 +1,8 @@
 package com.sidapps.risuscamera
 
+import kotlin.math.max
+import kotlin.math.min
+
 import android.Manifest
 import android.content.ContentValues
 import android.content.Context
@@ -22,6 +25,7 @@ import android.renderscript.RenderScript
 import android.renderscript.ScriptIntrinsicYuvToRGB
 import android.renderscript.Element
 import android.renderscript.Type
+import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,14 +38,20 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.google.android.gms.tasks.Tasks
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.face.FaceDetection
+import com.google.mlkit.vision.face.FaceDetectorOptions
 import com.sidapps.risuscamera.databinding.ActivityMainBinding
 import org.tensorflow.lite.Interpreter
+import java.io.ByteArrayOutputStream
 import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -163,6 +173,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var cameraExecutor: ExecutorService
     private lateinit var interpreter: Interpreter
 
+    private var lastPhotoTime = 0L
+
     private val smileDetector: SmileDetector by lazy {
         SmileDetector(assets)
     }
@@ -267,6 +279,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val smileAnalyzer = ImageAnalysis.Analyzer { imageProxy ->
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastPhotoTime < 3000) {
+            imageProxy.close()
+            return@Analyzer
+        }
+
         val rotationDegrees = imageProxy.imageInfo.rotationDegrees
         val context = this@MainActivity
         val bitmap = imageProxy.image?.yuvToRgb(context)
@@ -274,12 +292,14 @@ class MainActivity : AppCompatActivity() {
         bitmap?.let {
             val result = smileDetector.detectSmile(it)
             if (result) {
+                lastPhotoTime = currentTime
                 takePhoto()
             }
         }
 
         imageProxy.close()
     }
+
 
     override fun onDestroy() {
         super.onDestroy()
@@ -359,13 +379,52 @@ class SmileDetector(assetManager: AssetManager) {
     }
 
     fun detectSmile(bitmap: Bitmap): Boolean {
-        val inputBuffer = preprocessImage(bitmap)
+        val faceBitmap = detectAndCropFace(bitmap) ?: return false
+        val inputBuffer = preprocessImage(faceBitmap)
         val output = Array(1) { FloatArray(1) }
         interpreter.run(inputBuffer, output)
         val smileProbability = output[0][0]
         Log.d("SmileDetector", "Smile Probability: $smileProbability")
-        return smileProbability >= 0.7f
+        return smileProbability >= 0.5f
     }
+
+    private fun detectAndCropFace(bitmap: Bitmap): Bitmap? {
+        // High-accuracy options for face detection
+        val options = FaceDetectorOptions.Builder()
+            .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_ACCURATE)
+            .build()
+
+        val detector = FaceDetection.getClient(options)
+        val image = InputImage.fromBitmap(bitmap, 0)
+        try {
+            // Blocking call to detect faces, consider running in a separate thread
+            val faces = Tasks.await(detector.process(image))
+            if (faces.isNotEmpty()) {
+                val face = faces[0]
+                val bounds = face.boundingBox
+
+                // Clamp values to ensure they are within the bitmap's bounds
+                val left = max(0, bounds.left)
+                val top = max(0, bounds.top)
+                val right = min(bitmap.width, bounds.right)
+                val bottom = min(bitmap.height, bounds.bottom)
+                val width = right - left
+                val height = bottom - top
+
+                // Ensure width and height are positive and within bitmap bounds
+                if (width > 0 && height > 0) {
+                    return Bitmap.createBitmap(bitmap, left, top, width, height)
+                }
+            }
+        } catch (e: ExecutionException) {
+            Log.e("SmileDetector", "Failed to detect faces", e)
+        } catch (e: InterruptedException) {
+            Log.e("SmileDetector", "Face detection interrupted", e)
+        }
+
+        return null
+    }
+
 
     private fun preprocessImage(bitmap: Bitmap): ByteBuffer {
         // Resize the bitmap to 32x32 pixels
